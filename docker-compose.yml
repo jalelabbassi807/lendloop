@@ -1,0 +1,55 @@
+# n8n for LendLoop, plus Mailpit to catch the emails locally.
+#   cp n8n/.env.example n8n/.env   (fill it in)
+#   docker compose up
+# n8n editor: http://localhost:5678   Mailpit inbox: http://localhost:8025
+
+x-n8n: &n8n
+  image: docker.n8n.io/n8nio/n8n:2.46.7
+  env_file: ./n8n/.env
+  environment:
+    NODE_FUNCTION_ALLOW_BUILTIN: crypto # Code nodes sign/verify with crypto
+    N8N_BLOCK_ENV_ACCESS_IN_NODE: "false" # secrets are read with $env, not stored in the workflows
+    N8N_DIAGNOSTICS_ENABLED: "false"
+  volumes:
+    - n8n_data:/home/node/.n8n
+
+services:
+  # The SMTP credential is rebuilt from n8n/.env on every start. Workflows are
+  # imported and published the first time only, so edits made in the editor stick.
+  n8n-setup:
+    <<: *n8n
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        node /setup/smtp-credential.mjs /tmp/smtp.json
+        n8n import:credentials --input=/tmp/smtp.json
+        rm /tmp/smtp.json
+        [ -f /home/node/.n8n/.lendloop-imported ] && exit 0
+        n8n import:workflow --separate --input=/setup/workflows
+        n8n publish:workflow --id=q7XrN2kTbW9vLd4E
+        n8n publish:workflow --id=Hc3mZp8YsJ6aRt1G
+        n8n publish:workflow --id=uK5wE0fBx2nVg7Qy
+        touch /home/node/.n8n/.lendloop-imported
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n:/setup:ro
+
+  n8n:
+    <<: *n8n
+    depends_on:
+      n8n-setup:
+        condition: service_completed_successfully
+    ports:
+      - "5678:5678"
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # reach `convex dev` running on the host
+    restart: unless-stopped
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports:
+      - "8025:8025"
+
+volumes:
+  n8n_data:

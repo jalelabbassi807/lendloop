@@ -1,0 +1,386 @@
+{
+  "name": "LendLoop - Request notification",
+  "nodes": [
+    {
+      "id": "6874b462-a7d7-408b-8d53-7d428bf2f546",
+      "name": "Convex webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "39c91663-2972-4422-9e2c-c7647350679a",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lendloop-request",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "ffcace5a-6889-417d-b5fe-8a7f227218d6",
+      "name": "Verify HMAC signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const crypto = require('crypto');\n\nconst { headers = {}, body } = $input.first().json;\nconst secret = $env.CONVEX_TO_N8N_SECRET;\nconst timestamp = headers['x-lendloop-timestamp'];\nconst signature = String(headers['x-lendloop-signature'] || '').toLowerCase();\n\n// Convex sends compact JSON, so re-stringifying gives the same bytes if there's no raw body\nlet raw;\ntry {\n  raw = (await this.helpers.getBinaryDataBuffer(0, 'data')).toString('utf8');\n} catch {\n  raw = JSON.stringify(body);\n}\n\nfunction problem() {\n  if (!secret) return 'CONVEX_TO_N8N_SECRET is not set';\n  if (!timestamp || !signature) return 'missing signature headers';\n  const age = Math.abs(Date.now() / 1000 - Number(timestamp));\n  if (!(age <= 300)) return 'stale timestamp';\n  const expected = crypto.createHmac('sha256', secret).update(`${timestamp}.${raw}`).digest('hex');\n  if (expected.length !== signature.length) return 'bad signature';\n  if (!crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature))) return 'bad signature';\n  return null;\n}\n\nconst reason = problem();\nif (reason) return [{ json: { valid: false, reason } }];\n\nconst p = JSON.parse(raw);\nreturn [{\n  json: {\n    valid: true,\n    eventKey: p.eventKey,\n    event: p.event,\n    loanId: p.loanId,\n    toolName: p.toolName,\n    startDate: p.startDate,\n    endDate: p.endDate,\n    recipient: p.recipient,\n  },\n}];"
+      }
+    },
+    {
+      "id": "c9de7fb6-0ea4-44c8-b5b7-2e47c74efcd3",
+      "name": "Signature valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e606bd5f-4d01-497e-bcd4-4f38aac4f7c8",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "6b4ce29a-9423-4f4a-97b8-4d73845b6ab1",
+      "name": "Reply 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        420
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"error\": \"unauthorized\" } }}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    },
+    {
+      "id": "0f4ccad7-ac00-4371-a149-7228117275af",
+      "name": "Reply to Convex",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1540,
+        200
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"ok\": true } }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "8fa32d9c-2144-4e21-aef6-886072c999d0",
+      "name": "Compose message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const e = $json;\nconst dates = `${e.startDate} to ${e.endDate}`;\nconst text = {\n  request_created: `Someone asked to borrow your ${e.toolName} (${dates}). Open LendLoop to approve or decline.`,\n  approved: `Good news, your request for the ${e.toolName} (${dates}) was approved.`,\n  declined: `Your request for the ${e.toolName} (${dates}) was declined.`,\n  cancelled_by_borrower: `A request for your ${e.toolName} (${dates}) was cancelled.`,\n  returned: `The ${e.toolName} has been marked as returned. Thanks for borrowing!`,\n  listing_removed: `The ${e.toolName} listing was removed, so your request for ${dates} was cancelled.`,\n}[e.event] ?? 'One of your loans was updated.';\n\nreturn {\n  json: {\n    eventKey: e.eventKey,\n    loanId: e.loanId,\n    to: e.recipient.email,\n    subject: `LendLoop: ${e.toolName}`,\n    text: `Hi ${e.recipient.firstName},\\n\\n${text}\\n\\nLendLoop`,\n  },\n};"
+      }
+    },
+    {
+      "id": "5b56cff0-a90a-447d-9471-b86fa4cf69dd",
+      "name": "Sign write-back",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const crypto = require('crypto');\nconst secret = $env.N8N_TO_CONVEX_SECRET;\nif (!secret) throw new Error('N8N_TO_CONVEX_SECRET is not set');\n\nconst body = JSON.stringify({\n  kind: 'request_notification',\n  status: $json.status,\n  loanId: $json.loanId,\n  idempotencyKey: $json.eventKey,\n  detail: $json.detail,\n});\nconst timestamp = String(Math.floor(Date.now() / 1000));\nconst signature = crypto.createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');\nreturn { json: { body, headers: { 'Content-Type': 'application/json', 'X-LendLoop-Timestamp': timestamp, 'X-LendLoop-Signature': signature } } };"
+      }
+    },
+    {
+      "id": "fc870632-eb24-4faf-ba53-72b46b5baf35",
+      "name": "Write back to Convex",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CONVEX_SITE_URL }}/n8n/automation-result",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ JSON.stringify($json.headers) }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.body }}",
+        "options": {
+          "timeout": 10000
+        }
+      }
+    },
+    {
+      "id": "5dd0a0fd-7360-4a11-a767-b1c2ea4a3982",
+      "name": "Has an email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "77b6b0ab-8c60-457d-92d4-c323102b4a32",
+              "leftValue": "={{ $json.to }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "d5ae816e-8afa-4c81-b90d-af26f08d315a",
+      "name": "Send email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1100,
+        100
+      ],
+      "parameters": {
+        "fromEmail": "={{ $env.MAIL_FROM }}",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.text }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "smtp": {
+          "id": "Rk2mTq8vNs4LpX0a",
+          "name": "LendLoop SMTP"
+        }
+      }
+    },
+    {
+      "id": "b2d0ac75-5182-4e88-b2ce-732c64159181",
+      "name": "Emailed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        100
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const m = $('Compose message').item.json;\nreturn { json: { eventKey: m.eventKey, loanId: m.loanId, status: 'sent', detail: 'emailed' } };"
+      }
+    },
+    {
+      "id": "4f2b530b-63f9-4a31-b77c-6495cc9dedb7",
+      "name": "No email on file",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        320
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "return { json: { eventKey: $json.eventKey, loanId: $json.loanId, status: 'failed', detail: 'no email on file' } };"
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Convex webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify HMAC signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify HMAC signature": {
+      "main": [
+        [
+          {
+            "node": "Signature valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signature valid?": {
+      "main": [
+        [
+          {
+            "node": "Compose message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose message": {
+      "main": [
+        [
+          {
+            "node": "Has an email?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has an email?": {
+      "main": [
+        [
+          {
+            "node": "Send email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No email on file",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send email": {
+      "main": [
+        [
+          {
+            "node": "Emailed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Emailed": {
+      "main": [
+        [
+          {
+            "node": "Reply to Convex",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No email on file": {
+      "main": [
+        [
+          {
+            "node": "Reply to Convex",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply to Convex": {
+      "main": [
+        [
+          {
+            "node": "Sign write-back",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign write-back": {
+      "main": [
+        [
+          {
+            "node": "Write back to Convex",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "uK5wE0fBx2nVg7Qy",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all"
+  },
+  "versionId": "ca2cec9b-9211-45ae-9ee6-2665d31b8aad",
+  "id": "q7XrN2kTbW9vLd4E",
+  "tags": []
+}
