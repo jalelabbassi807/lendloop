@@ -82,6 +82,7 @@ Needs Node 20+, a Clerk account (free) and Docker for n8n. Convex can run locall
 
 ```bash
 npm install
+cp .env.example .env.local
 npx convex dev
 ```
 
